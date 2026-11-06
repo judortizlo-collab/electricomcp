@@ -27,6 +27,13 @@ CAPAS: dict[str, Capa] = {c.nombre: c for c in [
     Capa("ARQ-VANOS", 8, grosor=18, descripcion="Puertas y ventanas"),
     Capa("ARQ-RECINTOS", 9, grosor=13, descripcion="Nombres y áreas de recintos"),
     Capa("ARQ-REFERENCIA", 9, "DASHED", 13, "Linderos, proyecciones, vacíos"),
+    Capa("ARQ-MUROS-RELLENO", 253, grosor=0, descripcion="Achurado sólido de muros"),
+    Capa("ARQ-ESTRUCTURA", 8, grosor=35, descripcion="Columnas y elementos estructurales"),
+    Capa("ARQ-APARATOS", 9, grosor=13, descripcion="Aparatos sanitarios, mesones y equipos fijos"),
+    Capa("ARQ-EJES", 9, "DASHDOT", 13, "Ejes estructurales"),
+    Capa("ARQ-ESCALERAS", 9, grosor=13, descripcion="Escaleras y rampas"),
+    Capa("ARQ-RECINTOS-CONTORNO", 30, grosor=9, descripcion="Contorno de recintos detectados (no imprime)",
+         imprimible=False),
     # Eléctrico
     Capa("E-ILUMINACION", 3, grosor=25, descripcion="Salidas de iluminación"),
     Capa("E-INTERRUPTORES", 7, grosor=25, descripcion="Interruptores y sensores"),

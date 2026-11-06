@@ -38,6 +38,9 @@ class UsoRecinto(str, Enum):
     BALCON = "balcon"
     EXTERIOR = "exterior"
     CUARTO_TECNICO = "cuarto_tecnico"
+    PATIO = "patio"
+    DUCTO = "ducto"
+    ESCALERA = "escalera"
     OTRO = "otro"
 
 
@@ -67,6 +70,7 @@ class Recinto(BaseModel):
     nivel: str = "PISO 1"
     contorno: list[Punto] = Field(min_length=3)
     altura_cielo: float = 2.40
+    unidad: Optional[str] = None  # apartamento / local al que pertenece (paso 2)
 
     @property
     def area(self) -> float:
