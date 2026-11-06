@@ -23,7 +23,7 @@ from electromcp.arquitectura import aplicar_a_proyecto, depurar_plano
 from electromcp.backends.dxf_backend import DXFBackend
 from electromcp.diseno import ParametrosDiseno, disenar
 from electromcp.model import Proyecto, Rotulo
-from electromcp.render import Renderizador
+from electromcp.render import JUEGO_COMPLETO, Renderizador
 
 
 def main() -> None:
@@ -61,7 +61,7 @@ def main() -> None:
     (salida / f"{ruta.stem}_diseno.json").write_text(json.dumps(inf.reporte(), ensure_ascii=False, indent=2),
                                                      encoding="utf-8")
     p.guardar(salida / f"{ruta.stem}_proyecto.json")
-    laminas = ("iluminacion", "tomas", "cuadros")
+    laminas = JUEGO_COMPLETO  # localización ilum. y tomas, cuadros/unifilares, constructivos
     if a.autocad:
         from electromcp.backends.autocad_com import AutoCADBackend
 
@@ -74,11 +74,15 @@ def main() -> None:
         from electromcp.preview import dxf_a_png
 
         ancho = r.pl.ancho + r.pl.mm(100)
-        nombres = ["iluminacion", "tomas"] + [f"cuadros_{k}" for k in range(1, 10)]
-        n = len(p.niveles) * 2 + _hojas_cuadros(p, r)
-        for k in range(n):
+        nombres = []
+        for tipo in laminas:
+            if tipo == "cuadros":
+                nombres += [f"cuadros_{k}" for k in range(1, _hojas_cuadros(p, r) + 1)]
+            else:
+                nombres += [f"{tipo}_{nv.replace(' ', '')}" for nv in p.niveles]
+        for k, nombre in enumerate(nombres):
             x0 = k * ancho
-            png = salida / f"{ruta.stem}_electrico_{k + 1:02d}_{nombres[k] if k < len(nombres) else k}.png"
+            png = salida / f"{ruta.stem}_ELE-{k + 1:02d}_{nombre}.png"
             dxf_a_png(dxf, png, dpi=110, ventana=(x0, 0, x0 + r.pl.ancho, r.pl.alto), lado_mayor_pulg=24)
             print("PNG:", png)
 

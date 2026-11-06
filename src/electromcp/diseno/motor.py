@@ -498,16 +498,12 @@ class _Motor:
             if not nodos:
                 continue
             raiz = tab.posicion
-            padre, d_raiz = _prim(raiz, [s.posicion for s in nodos], permitido)
-            # interruptores y sensores: a la luminaria más cercana que controlan
-            todos = list(nodos)
-            for s in ctrl:
-                letras = set(s.control or "")
-                cands = [i for i, n in enumerate(nodos) if (n.control or "") in letras] or list(range(len(nodos)))
-                j = min(cands, key=lambda i: dist(nodos[i].posicion, s.posicion))
-                todos.append(s)
-                padre.append(j + 1)
-                d_raiz.append(d_raiz[j + 1] + dist(nodos[j].posicion, s.posicion))
+            if sistema == "techo" and ctrl:
+                todos, padre, d_raiz, retornos = self._arbol_alumbrado(raiz, nodos, ctrl, permitido)
+            else:
+                padre, d_raiz = _prim(raiz, [s.posicion for s in nodos], permitido)
+                todos = list(nodos)
+                retornos = [0] * (len(todos) + 1)
             pts = [raiz] + [s.posicion for s in todos]
             n = len(pts)
             hijos = defaultdict(list)
@@ -515,7 +511,6 @@ class _Motor:
                 hijos[padre[i]].append(i)
             # circuitos aguas abajo de cada nodo
             abajo: list[set] = [set() for _ in range(n)]
-            retornos: list[int] = [0] * n
 
             def acumular(i):
                 if i > 0 and todos[i - 1].circuito:
@@ -527,10 +522,6 @@ class _Motor:
             import sys
             sys.setrecursionlimit(max(1000, 4 * n))
             acumular(0)
-            for i in range(1, n):
-                s = todos[i - 1]
-                if s.simbolo.startswith("INT_"):
-                    retornos[i] = len(s.control or "a")
             # longitud por circuito (para la regulación): recorrido + bajantes
             bajante = 1.0 if sistema == "techo" else 1.9
             for i in range(1, n):
@@ -542,6 +533,90 @@ class _Motor:
             for i in hijos[0]:
                 self._cadena(u, tab, 0, i, pts, hijos, abajo, retornos, circ, tipo, h_cielo if sistema == "techo"
                              else 0.0, sistema)
+
+    def _arbol_alumbrado(self, raiz, luces: list[Salida], ctrl: list[Salida], permitido):
+        """Topología de los planos de referencia: tablero -> interruptores (troncal, fase y neutro por circuito)
+        -> luminarias de cada interruptor (neutro + un retorno por tecla aguas abajo).
+
+        Devuelve (nodos, padre, distancia_a_raiz, retornos) con índices 1..n (0 = tablero).
+        """
+        # cada luminaria queda con el interruptor (o sensor) del mismo recinto que tiene su letra
+        duenos: dict[int, list[int]] = defaultdict(list)
+        sueltas = []
+        raices = []  # un interruptor por grupo de letras; los demás (conmutables) cuelgan del grupo
+        vistos: dict[str, int] = {}
+        for j, c in enumerate(ctrl):
+            clave = (c.recinto or "") + "|" + "".join(sorted(c.control or ""))
+            if clave in vistos:
+                continue
+            vistos[clave] = j
+            raices.append(j)
+        for i, l in enumerate(luces):
+            cands = [j for j in raices if (l.control or "?") in (ctrl[j].control or "")
+                     and ctrl[j].recinto == l.recinto] or \
+                    [j for j in raices if (l.control or "?") in (ctrl[j].control or "")]
+            if cands:
+                j = min(cands, key=lambda j: dist(ctrl[j].posicion, l.posicion))
+                duenos[j].append(i)
+            else:
+                sueltas.append(i)
+        # troncal: tablero + interruptores raíz + luminarias sin interruptor
+        troncal = [("c", j) for j in raices] + [("l", i) for i in sueltas]
+        pos_t = [ctrl[j].posicion if k == "c" else luces[j].posicion for k, j in troncal]
+        p_t, d_t = _prim(raiz, pos_t, permitido)
+        nodos: list[Salida] = []
+        padre = [0]
+        d_raiz = [0.0]
+        retornos = [0]
+        indice: dict[tuple, int] = {}
+        en_grupo: set[int] = set()
+        for k, (tp, j) in enumerate(troncal, 1):
+            nodos.append(ctrl[j] if tp == "c" else luces[j])
+            indice[(tp, j)] = len(nodos)
+        for k, (tp, j) in enumerate(troncal, 1):
+            pk = p_t[k]
+            padre.append(0 if pk == 0 else indice[troncal[pk - 1]])
+            d_raiz.append(d_t[k])
+            retornos.append(0)
+        # grupo de cada interruptor: árbol mínimo desde el interruptor
+        for j, ls in duenos.items():
+            r = indice[("c", j)]
+            p_g, d_g = _prim(ctrl[j].posicion, [luces[i].posicion for i in ls], permitido)
+            base = len(nodos)
+            for k, i in enumerate(ls, 1):
+                nodos.append(luces[i])
+                en_grupo.add(len(nodos))
+            for k, i in enumerate(ls, 1):
+                padre.append(r if p_g[k] == 0 else base + p_g[k])
+                d_raiz.append(d_raiz[r] + d_g[k])
+                retornos.append(0)
+        # conmutables / interruptores adicionales: a la luminaria más cercana de su grupo
+        for j, c in enumerate(ctrl):
+            if j in raices:
+                continue
+            grupo = [k for k, nd in enumerate(nodos, 1) if nd.control and nd.control in (c.control or "")
+                     and not nd.simbolo.startswith("INT_")] or list(range(1, len(nodos) + 1))
+            q = min(grupo, key=lambda k: dist(nodos[k - 1].posicion, c.posicion))
+            nodos.append(c)
+            padre.append(q)
+            d_raiz.append(d_raiz[q] + dist(nodos[q - 1].posicion, c.posicion))
+            retornos.append(len(c.control or "a") + 1)  # viajeros
+        # retornos de los tramos dentro de cada grupo: una por letra distinta aguas abajo
+        hijos = defaultdict(list)
+        for i in range(1, len(padre)):
+            hijos[padre[i]].append(i)
+
+        def letras(i) -> set:
+            nd = nodos[i - 1]
+            out = set(nd.control or "") if not nd.simbolo.startswith(("INT_", "SENSOR")) else set()
+            for h in hijos[i]:
+                if not nodos[h - 1].simbolo.startswith(("INT_", "SENSOR")):
+                    out |= letras(h)
+            return out
+
+        for i in en_grupo:
+            retornos[i] = max(1, len(letras(i)))
+        return nodos, padre, d_raiz, retornos
 
     def _cadena(self, u, tab, a, b, pts, hijos, abajo, retornos, circ, tipo, elev, sistema):
         ruta = [pts[a], pts[b]]
@@ -555,7 +630,7 @@ class _Motor:
             cal = circ[cs[0]].calibre_awg if cs and cs[0] in circ else "14"
             cond = [cal] * (1 + retornos[b])
             prot = circ[cs[0]].proteccion_a if cs and cs[0] in circ else 15
-            texto = f"1F+{retornos[b]}R #{cal} + 1#{calibre_tierra(prot)}T"
+            texto = f"1N+{retornos[b]}R #{cal} + 1#{calibre_tierra(prot)}T"
         else:
             cond = []
             for c in cs:

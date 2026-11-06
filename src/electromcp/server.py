@@ -213,8 +213,9 @@ def listar_simbolos() -> list[dict]:
 # ------------------------------------------------------------------ salida
 _LAMINAS = {"iluminacion_y_tomas": ("iluminacion", "tomas"), "completo": ("completo",),
             "iluminacion": ("iluminacion",), "tomas": ("tomas",), "cuadros": ("cuadros",),
-            "todo": ("iluminacion", "tomas", "cuadros")}
-TipoLaminas = Literal["iluminacion_y_tomas", "completo", "iluminacion", "tomas", "cuadros", "todo"]
+            "localizacion": ("loc_iluminacion", "loc_tomas"),
+            "todo": ("loc_iluminacion", "loc_tomas", "cuadros", "iluminacion", "tomas")}
+TipoLaminas = Literal["iluminacion_y_tomas", "completo", "iluminacion", "tomas", "cuadros", "localizacion", "todo"]
 
 
 @mcp.tool()
