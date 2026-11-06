@@ -68,6 +68,7 @@ class Aparato:
     bloque: str
     capa: str
     recinto: Optional[str] = None
+    tamano: Optional[tuple[float, float]] = None
 
 
 @dataclass
@@ -192,6 +193,39 @@ _APARATOS = [
     ("lavadero", ("lavadero",)),
     ("calentador", ("calentador", "heater")),
 ]
+
+
+def tipo_por_geometria(conteo: dict[str, int], ancho: float, fondo: float, cocina: bool) -> str:
+    """Reconoce el aparato por su dibujo cuando el nombre del bloque no dice nada (A$C1870eec4, *U38...).
+
+    Firmas típicas de las bibliotecas 2D: estufa = muchos círculos (fogones y perillas); lavadero = muchas
+    polilíneas paralelas (la tabla de lavar); lavadora = elipses de la tapa o del tambor; lavaplatos = pocos
+    círculos (desagüe, grifería) y arcos de la poceta; plato de ducha = 1-2 polilíneas de ~0,9 m.
+    """
+    c = conteo.get("CIRCLE", 0)
+    e = conteo.get("ELLIPSE", 0)
+    pl = conteo.get("LWPOLYLINE", 0) + conteo.get("POLYLINE", 0)
+    arcos = conteo.get("ARC", 0)
+    lado_max, lado_min = max(ancho, fondo), min(ancho, fondo)
+    if cocina:
+        if c >= 8:
+            return "estufa"
+        if e >= 4:
+            return "lavadora"
+        if pl >= 12:
+            return "lavadero"
+        if conteo.get("SPLINE", 0) and 0.55 <= lado_min and lado_max <= 0.9:
+            return "nevera"
+        if 2 <= c <= 7 and arcos >= 3:
+            return "lavaplatos"
+        return "aparato_cocina"
+    if pl <= 2 and sum(conteo.values()) <= 3 and 0.75 <= lado_min and lado_max <= 1.6:
+        return "ducha"
+    if c >= 4 and lado_max <= 0.6 and arcos <= 2:
+        return "lavamanos"
+    if arcos >= 6 and 0.45 <= lado_max <= 0.8:
+        return "inodoro"
+    return "aparato_sanitario"
 
 
 def tipo_aparato(nombre_bloque: str) -> str:
@@ -727,13 +761,18 @@ def _aparatos(els: list[Elemento], recintos: list[RecintoDetectado]) -> list[Apa
             continue  # bloque que agrupa un apartamento completo, no un aparato
         c = g.centroid
         nombre = grupo[0].bloque_interno or grupo[0].bloque or ""
-        a = Aparato(tipo_aparato(nombre), (round(c.x, 3), round(c.y, 3)), nombre, grupo[0].capa)
+        x0, y0, x1, y1 = g.bounds
+        a = Aparato(tipo_aparato(nombre), (round(c.x, 3), round(c.y, 3)), nombre, grupo[0].capa,
+                    tamano=(round(x1 - x0, 3), round(y1 - y0, 3)))
         a.recinto = _recinto_en(c, recintos)
         if a.tipo == "aparato":
             capa = normalizar(grupo[0].capa)
+            conteo: dict[str, int] = defaultdict(int)
+            for el in grupo:
+                conteo[el.tipo] += 1
             if "bano" in capa or "sanit" in capa:
-                a.tipo = "aparato_sanitario"
+                a.tipo = tipo_por_geometria(conteo, x1 - x0, y1 - y0, cocina=False)
             elif "cocina" in capa or "kitchen" in capa:
-                a.tipo = "aparato_cocina"
+                a.tipo = tipo_por_geometria(conteo, x1 - x0, y1 - y0, cocina=True)
         out.append(a)
     return out

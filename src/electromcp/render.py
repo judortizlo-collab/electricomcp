@@ -8,15 +8,16 @@ abajo a la derecha y el marco del pliego. Escala de impresión 1:50 por defecto.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal, Optional
 
 from .backends.base import Backend
 from .layers import CAPAS, TIPOS_LINEA
-from .model import Proyecto, TipoCircuito, TipoTuberia
+from .model import Proyecto, TipoCircuito, TipoTuberia, etiqueta_circuito
 from .symbols import SIMBOLOS, caja
 
-TipoLamina = Literal["iluminacion", "tomas", "completo"]
+TipoLamina = Literal["iluminacion", "tomas", "completo", "cuadros"]
 
 CAPA_TUBERIA = {
     TipoTuberia.MURO: "E-TUB-MURO",
@@ -36,6 +37,7 @@ TITULO_LAMINA = {
     "iluminacion": "REDES ELÉCTRICAS DE ILUMINACIÓN",
     "tomas": "REDES ELÉCTRICAS DE TOMAS",
     "completo": "REDES ELÉCTRICAS",
+    "cuadros": "CUADROS DE CARGA Y DIAGRAMAS UNIFILARES",
 }
 
 
@@ -84,13 +86,25 @@ class Renderizador:
     def dibujar_juego(self, laminas: tuple[TipoLamina, ...] = ("iluminacion", "tomas")) -> str:
         """Dibuja todas las láminas (cada nivel x cada tipo) una al lado de otra."""
         self.preparar()
-        total = len(self.p.niveles) * len(laminas)
+        planos = [(nivel, tipo) for nivel in self.p.niveles for tipo in laminas if tipo != "cuadros"]
+        hojas_cuadros = []
+        if "cuadros" in laminas:
+            from .render_cuadros import paginar
+
+            hojas_cuadros = paginar(self.p, self.pl)
+        total = len(planos) + len(hojas_cuadros)
         n = 0
-        for nivel in self.p.niveles:
-            for tipo in laminas:
-                n += 1
-                origen = ((n - 1) * (self.pl.ancho + self.pl.mm(100)), 0.0)
-                self.dibujar_lamina(nivel, tipo, origen, f"{n:02d} DE {total:02d}")
+        for nivel, tipo in planos:
+            n += 1
+            origen = ((n - 1) * (self.pl.ancho + self.pl.mm(100)), 0.0)
+            self.dibujar_lamina(nivel, tipo, origen, f"{n:02d} DE {total:02d}")
+        for hoja in hojas_cuadros:
+            n += 1
+            origen = ((n - 1) * (self.pl.ancho + self.pl.mm(100)), 0.0)
+            hoja.dibujar(self, origen)
+            self._rotulo(self.p.niveles[0], "cuadros", f"{n:02d} DE {total:02d}",
+                         (origen[0] + self.pl.ancho - self.pl.mm(15), origen[1] + self.pl.mm(15)))
+            self._marco(*origen)
         return self.b.finalizar()
 
     def dibujar_lamina(self, nivel: str, tipo: TipoLamina, origen=(0.0, 0.0),
@@ -176,10 +190,29 @@ class Renderizador:
         for t in self.p.tuberias:
             if t.nivel != nivel or not self._tipo_tuberia_en_lamina(t.circuitos, tipo):
                 continue
-            if t.tipo == TipoTuberia.COMUNICACIONES and tipo == "iluminacion":
+            if t.tipo in (TipoTuberia.COMUNICACIONES, TipoTuberia.ACOMETIDA) and tipo == "iluminacion":
                 continue
             pts = [self._t(q) for q in t.ruta]
             self.b.polilinea(pts, CAPA_TUBERIA[t.tipo])
+            largo = sum(((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in zip(pts, pts[1:]))
+            if t.auto and t.circuitos:
+                # tubería del motor: se rotulan los tramos largos con más de un circuito y los alimentadores
+                if t.tipo != TipoTuberia.ACOMETIDA and (largo < 1.2 or len(t.circuitos) < 2):
+                    continue
+                i = max(range(len(pts) - 1),
+                        key=lambda k: (pts[k + 1][0] - pts[k][0]) ** 2 + (pts[k + 1][1] - pts[k][1]) ** 2)
+                (x1, y1), (x2, y2) = pts[i], pts[i + 1]
+                ang = math.degrees(math.atan2(y2 - y1, x2 - x1))
+                if ang > 90 or ang <= -90:
+                    ang -= 180 if ang > 0 else -180
+                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+                nx, ny = -math.sin(math.radians(ang)), math.cos(math.radians(ang))
+                etq = ", ".join(etiqueta_circuito(c) for c in t.circuitos)
+                if t.diametro != '1/2"' or t.tipo == TipoTuberia.ACOMETIDA:
+                    etq += f"  %%c{t.diametro}"
+                self.b.texto(etq, (mx + nx * 0.10, my + ny * 0.10), 0.08, "E-CIRCUITOS", centrado=True,
+                             rot_grados=ang)
+                continue
             if t.circuitos:
                 # Etiqueta en el tramo más largo
                 i = max(range(len(pts) - 1),
@@ -199,8 +232,15 @@ class Renderizador:
             if sim.grupo not in grupos:
                 continue
             attrs = {}
-            if "CIRCUITO" in sim.atributos and s.circuito:
-                attrs["CIRCUITO"] = s.circuito
+            if "CIRCUITO" in sim.atributos:
+                if s.simbolo.startswith("INT_") or s.simbolo == "SENSOR_MOV":
+                    etq = s.control or ""  # el interruptor muestra las letras que enciende
+                else:
+                    etq = etiqueta_circuito(s.circuito)
+                    if s.control and sim.grupo == "iluminacion":
+                        etq = f"{etq} {s.control}".strip()
+                if etq:
+                    attrs["CIRCUITO"] = etq
             self.b.insertar_bloque(s.simbolo, self._t(s.posicion), s.rotacion, sim.capa, attrs)
 
     def _tableros(self, nivel: str) -> None:
@@ -290,7 +330,7 @@ class Renderizador:
         celda(x0, y0 + 5 * f, x1, y0 + 6 * f, "NOMBRE DE PROYECTO:", r.proyecto or self.p.nombre, pl.mm(4.5))
         celda(x0, y0 + 4 * f, xm, y0 + 5 * f, "DIRECCIÓN:", r.direccion)
         celda(xm, y0 + 4 * f, x1, y0 + 5 * f, "MUNICIPIO:", r.municipio)
-        contiene = r.contiene or f"{TITULO_LAMINA[tipo]} {nivel}"
+        contiene = r.contiene or (TITULO_LAMINA[tipo] if tipo == "cuadros" else f"{TITULO_LAMINA[tipo]} {nivel}")
         celda(x0, y0 + 3 * f, xm, y0 + 4 * f, "CONTIENE:", contiene)
         celda(xm, y0 + 3 * f, x1, y0 + 4 * f, "TIPO DE PROYECTO:", r.tipo_proyecto)
         celda(x0, y0 + 2 * f, xm, y0 + 3 * f, "CONSTRUCTOR:", r.constructor)

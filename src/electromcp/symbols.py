@@ -135,6 +135,9 @@ SIMBOLOS: dict[str, Simbolo] = {s.clave: s for s in [
             2.00, 20, "iluminacion"),
     Simbolo("CINTA_LED", "Cinta LED decorativa (por metro)", "E-ILUMINACION", 6,
             (Linea((-R * 3, 0), (R * 3, 0)), Linea((-R * 3, R * 0.3), (R * 3, R * 0.3))), None, 10, "iluminacion"),
+    Simbolo("EXTRACTOR", "Salida para extractor de baño (ventilación mecánica)", "E-ILUMINACION", 3,
+            (Polilinea(((-R, -R), (R, -R), (R, R), (-R, R))), Linea((-R, -R), (R, R)), Linea((-R, R), (R, -R)),
+             Circulo((0, 0), R * 0.45)), None, 40, "iluminacion"),
     Simbolo("SENSOR_MOV", "Sensor de movimiento", "E-INTERRUPTORES", 1,
             (Circulo((0, 0), R), Polilinea(_semicirculo(R * 0.6, abajo=False), False, True)), 2.40, None, "iluminacion"),
     # ------------------------------------------------ interruptores (h = 1.20 m)

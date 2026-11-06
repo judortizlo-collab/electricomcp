@@ -11,7 +11,7 @@ from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 
 from ..layers import CAPAS, TIPOS_LINEA
-from ..model import Proyecto, Recinto, TrazoArq
+from ..model import Aparato, Proyecto, Recinto, TrazoArq, UsoRecinto, Vano, Zona
 from .analisis import Interpretacion, _poligonos
 
 ESTILO = "ELECTRO"
@@ -282,7 +282,8 @@ def reporte(interp: Interpretacion, plano=None) -> dict:
         "ventanas": [{"ancho_m": v.ancho, "recintos": v.recintos,
                       "centro": [round(v.poligono.centroid.x, 3), round(v.poligono.centroid.y, 3)]}
                      for v in interp.ventanas],
-        "aparatos": [{"tipo": a.tipo, "bloque": a.bloque, "recinto": a.recinto, "centro": list(a.centro)}
+        "aparatos": [{"tipo": a.tipo, "bloque": a.bloque, "recinto": a.recinto, "centro": list(a.centro),
+                      "tamano": list(a.tamano) if a.tamano else None}
                      for a in interp.aparatos],
         "capas": [i.resumen() for i in sorted(interp.capas.values(), key=lambda i: (i.categoria.value, i.nombre))],
         "avisos": interp.avisos,
@@ -340,14 +341,62 @@ def aplicar_a_proyecto(proyecto: Proyecto, interp: Interpretacion, nivel: str, r
 
     existentes = {r.id for r in proyecto.recintos}
     mapa = {}
+    vacios = interp.vacios
     for r in interp.recintos:
         rid = r.id if r.id not in existentes else proyecto.siguiente_id("R", "recintos")
         mapa[r.id] = rid
         contorno = [(round(x, 4), round(y, 4)) for x, y in r.poligono.exterior.coords[:-1]]
+        en_vacio = sum(r.poligono.intersection(v).area for v in vacios) > 0.5 * r.poligono.area
+        zonas = []
+        for z in r.zonas:
+            pz = z["poligono"]
+            if pz.is_empty or pz.geom_type != "Polygon" or pz.area < 0.3:
+                continue
+            zonas.append(Zona(nombre=z["nombre"], uso=z["uso"],
+                              contorno=[(round(x, 4), round(y, 4)) for x, y in pz.exterior.coords[:-1]]))
         proyecto.recintos.append(Recinto(id=rid, nombre=r.nombre, uso=r.uso, nivel=nivel, contorno=contorno,
-                                         unidad=r.unidad))
+                                         unidad=r.unidad, comun=r.comun, notas=list(r.notas), zonas=zonas,
+                                         vacio=en_vacio or r.uso in (UsoRecinto.DUCTO,)))
         existentes.add(rid)
-    return {"recintos": len(interp.recintos), "trazos_arquitectura": len(trazos), "ids": mapa}
+
+    def rid(x):
+        return mapa.get(x, x)
+
+    if reemplazar:
+        proyecto.vanos = [v for v in proyecto.vanos if v.nivel != nivel]
+        proyecto.aparatos = [a for a in proyecto.aparatos if a.nivel != nivel]
+    for p in interp.puertas:
+        hacia = None
+        if p.abierta:
+            from shapely.geometry import Point as _P
+
+            pa = _P(p.abierta)
+            for r in interp.recintos:
+                if r.poligono.buffer(0.05).contains(pa):
+                    hacia = rid(r.id)
+                    break
+        proyecto.vanos.append(Vano(id=proyecto.siguiente_id("V", "vanos"), tipo="puerta",
+                                   p1=(round(p.bisagra[0], 4), round(p.bisagra[1], 4)),
+                                   p2=(round(p.extremo[0], 4), round(p.extremo[1], 4)), nivel=nivel,
+                                   recintos=[rid(x) for x in p.recintos], abre_hacia=hacia))
+    for v in interp.ventanas:
+        rect = v.poligono.minimum_rotated_rectangle
+        cs = list(rect.exterior.coords)[:4]
+        lados = sorted(((cs[i], cs[(i + 1) % 4]) for i in range(4)),
+                       key=lambda ab: -((ab[1][0] - ab[0][0]) ** 2 + (ab[1][1] - ab[0][1]) ** 2))
+        (a1, a2), (b1, b2) = lados[0], lados[1]
+        # eje = línea media entre los dos lados largos
+        p1 = ((a1[0] + b2[0]) / 2, (a1[1] + b2[1]) / 2)
+        p2 = ((a2[0] + b1[0]) / 2, (a2[1] + b1[1]) / 2)
+        proyecto.vanos.append(Vano(id=proyecto.siguiente_id("V", "vanos"), tipo="ventana",
+                                   p1=(round(p1[0], 4), round(p1[1], 4)), p2=(round(p2[0], 4), round(p2[1], 4)),
+                                   nivel=nivel, recintos=[rid(x) for x in v.recintos]))
+    for a in interp.aparatos:
+        proyecto.aparatos.append(Aparato(id=proyecto.siguiente_id("A", "aparatos"), tipo=a.tipo,
+                                         posicion=a.centro, nivel=nivel, recinto=rid(a.recinto) if a.recinto else None,
+                                         tamano=a.tamano))
+    return {"recintos": len(interp.recintos), "trazos_arquitectura": len(trazos), "ids": mapa,
+            "vanos": len(interp.puertas) + len(interp.ventanas), "aparatos": len(interp.aparatos)}
 
 
 def guardar_reporte(rep: dict, ruta: str | Path) -> Path:

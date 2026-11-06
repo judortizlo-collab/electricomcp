@@ -29,7 +29,10 @@ mcp = _Servidor(
     instructions=(
         "Herramientas de diseño eléctrico residencial/comercial para Colombia (NTC 2050, RETIE). "
         "Unidades en metros; alturas sobre NPT. Si hay plano arquitectónico: analizar_plano -> depurar_plano "
-        "(detecta muros, vanos, recintos y apartamentos y los carga al proyecto) -> corregir_recinto si hace falta. "
+        "(detecta muros, vanos, recintos y apartamentos y los carga al proyecto) -> corregir_recinto si hace falta "
+        "-> disenar_instalacion (paso 3: tomas NTC 2050, iluminación RETILAP, interruptores, circuitos, tableros, "
+        "tubería y cuadros de carga) -> verificar_diseno / cuadro_de_cargas -> generar_dxf(laminas='todo') o "
+        "dibujar_en_autocad(laminas='todo'). "
         "Flujo manual: crear_proyecto -> agregar_recinto -> "
         "agregar_tablero -> agregar_circuito -> agregar_salidas -> trazar_tuberia -> generar_dxf o "
         "dibujar_en_autocad. Use listar_simbolos para conocer las claves de símbolo. "
@@ -38,7 +41,7 @@ mcp = _Servidor(
 )
 
 CARPETA = Path(os.environ.get("ELECTROMCP_DIR", Path.home() / "ElectroMCP"))
-_estado: dict[str, Optional[Proyecto]] = {"proyecto": None}
+_estado: dict = {"proyecto": None, "informe": None}
 
 
 def _ruta_json(nombre: str) -> Path:
@@ -209,14 +212,16 @@ def listar_simbolos() -> list[dict]:
 
 # ------------------------------------------------------------------ salida
 _LAMINAS = {"iluminacion_y_tomas": ("iluminacion", "tomas"), "completo": ("completo",),
-            "iluminacion": ("iluminacion",), "tomas": ("tomas",)}
+            "iluminacion": ("iluminacion",), "tomas": ("tomas",), "cuadros": ("cuadros",),
+            "todo": ("iluminacion", "tomas", "cuadros")}
+TipoLaminas = Literal["iluminacion_y_tomas", "completo", "iluminacion", "tomas", "cuadros", "todo"]
 
 
 @mcp.tool()
 def generar_dxf(nombre_archivo: Optional[str] = None,
-                laminas: Literal["iluminacion_y_tomas", "completo", "iluminacion", "tomas"] = "iluminacion_y_tomas",
-                vista_previa: bool = False) -> dict:
-    """Genera un DXF con las láminas del proyecto (un pliego por nivel y tipo)."""
+                laminas: TipoLaminas = "todo", vista_previa: bool = False) -> dict:
+    """Genera un DXF con las láminas del proyecto (un pliego por nivel y tipo). 'todo' agrega los cuadros de
+    carga y diagramas unifilares."""
     p = _p()
     nombre = nombre_archivo or f"{_ruta_json(p.nombre).stem}.dxf"
     ruta = CARPETA / "salidas" / nombre
@@ -230,8 +235,7 @@ def generar_dxf(nombre_archivo: Optional[str] = None,
 
 
 @mcp.tool()
-def dibujar_en_autocad(laminas: Literal["iluminacion_y_tomas", "completo", "iluminacion", "tomas"] = "iluminacion_y_tomas",
-                       nuevo_dibujo: bool = True) -> dict:
+def dibujar_en_autocad(laminas: TipoLaminas = "todo", nuevo_dibujo: bool = True) -> dict:
     """Dibuja el proyecto directamente en el AutoCAD abierto (solo Windows, AutoCAD completo)."""
     from .backends.autocad_com import AutoCADBackend
 
@@ -331,6 +335,76 @@ def exportar_dibujo_activo() -> dict:
 
     destino = CARPETA / "planos" / f"dibujo_activo_{datetime.now():%Y%m%d_%H%M%S}.dxf"
     return {"dxf": str(dibujo_activo_a_dxf(destino))}
+
+
+# ------------------------------------------------------------------ diseño automático (paso 3)
+@mcp.tool()
+def disenar_instalacion(nivel: Optional[str] = None, unidades: Optional[list[str]] = None,
+                        estufa: Literal["gas", "electrica"] = "gas",
+                        calentador: Literal["gas", "electrico", "ninguno"] = "gas",
+                        comunicaciones: bool = True, sensores_zonas_comunes: bool = True,
+                        max_tomas_por_circuito: int = 8, max_salidas_iluminacion: int = 12,
+                        parametros: Optional[dict] = None) -> dict:
+    """Diseña la instalación del nivel a partir de los recintos (paso 3):
+    tomas según NTC 2050 210.52 (pared, mesón, baños, lavandería, pasillos) con GFCI donde lo exige 210.8;
+    iluminación por método de lúmenes con los niveles de RETILAP; interruptores en el lado de la chapa;
+    extractores en baños con ventilación mecánica; circuitos (pequeños artefactos, baños, lavandería, generales,
+    alumbrado) con balance de fases; un tablero por unidad, tablero de servicios generales y medidores;
+    tubería de recorrido mínimo con conductores y diámetro por llenado; cuadros de carga con demanda (220),
+    protección general, alimentador y regulación. Reemplaza lo generado antes por el motor y conserva lo manual.
+    parametros: cualquier campo de ParametrosDiseno (p. ej. {"lumenes_por_w": 90, "proteccion_iluminacion_a": 20}).
+    """
+    from .diseno import ParametrosDiseno, disenar
+
+    datos = dict(parametros or {})
+    datos.update(estufa=estufa, calentador=calentador, comunicaciones=comunicaciones,
+                 sensores_zonas_comunes=sensores_zonas_comunes, max_tomas_por_circuito=max_tomas_por_circuito,
+                 max_salidas_iluminacion=max_salidas_iluminacion)
+    inf = disenar(_p(), ParametrosDiseno(**datos), nivel, unidades)
+    _estado["informe"] = inf
+    ruta = _guardar()
+    import json
+
+    rep = CARPETA / "salidas" / f"{_ruta_json(_p().nombre).stem}_diseno.json"
+    rep.parent.mkdir(parents=True, exist_ok=True)
+    rep.write_text(json.dumps(inf.reporte(), ensure_ascii=False, indent=2), encoding="utf-8")
+    out = inf.resumen()
+    out["archivos"] = {"proyecto": ruta, "reporte": str(rep)}
+    return out
+
+
+@mcp.tool()
+def cuadro_de_cargas(tablero: Optional[str] = None) -> dict:
+    """Cuadro de cargas de un tablero (o de todos): circuitos, VA por fase, corriente, protección, conductor,
+    tubo, longitud, regulación, cálculo de demanda (NTC 2050 Sección 220), protección general y alimentador."""
+    from .diseno.cuadro import cuadros_del_proyecto
+
+    cs = cuadros_del_proyecto(_p())
+    if tablero:
+        if tablero not in cs:
+            raise ValueError(f"No hay cuadro para {tablero!r}. Tableros: {sorted(cs)}")
+        return cs[tablero].como_dict()
+    return {k: v.resumen_corto() for k, v in cs.items()}
+
+
+@mcp.tool()
+def verificar_diseno(solo_incumplimientos: bool = False) -> dict:
+    """Lista de requisitos NTC 2050 revisados en el último diseño, con artículo, resultado y si cumple."""
+    inf = _estado.get("informe")
+    if inf is None:
+        raise ValueError("Ejecute disenar_instalacion primero.")
+    v = [x for x in inf.verificacion if not (solo_incumplimientos and x["cumple"])]
+    return {"requisitos": len(inf.verificacion), "cumplen": sum(x["cumple"] for x in inf.verificacion),
+            "detalle": v, "calculos_luminicos": [c.resumen() for c in inf.calculos_luminicos],
+            "avisos": inf.avisos}
+
+
+@mcp.tool()
+def parametros_diseno() -> dict:
+    """Criterios por defecto del motor de diseño, con los artículos de la norma que aplica cada uno."""
+    from .diseno import ART, ParametrosDiseno
+
+    return {"parametros": ParametrosDiseno().model_dump(), "articulos": ART}
 
 
 def main() -> None:
