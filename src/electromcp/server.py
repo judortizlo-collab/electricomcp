@@ -28,7 +28,9 @@ mcp = _Servidor(
     "electromcp",
     instructions=(
         "Herramientas de diseño eléctrico residencial/comercial para Colombia (NTC 2050, RETIE). "
-        "Unidades en metros; alturas sobre NPT. Flujo típico: crear_proyecto -> agregar_recinto -> "
+        "Unidades en metros; alturas sobre NPT. Si hay plano arquitectónico: analizar_plano -> depurar_plano "
+        "(detecta muros, vanos, recintos y apartamentos y los carga al proyecto) -> corregir_recinto si hace falta. "
+        "Flujo manual: crear_proyecto -> agregar_recinto -> "
         "agregar_tablero -> agregar_circuito -> agregar_salidas -> trazar_tuberia -> generar_dxf o "
         "dibujar_en_autocad. Use listar_simbolos para conocer las claves de símbolo. "
         "El diseño final debe ser revisado y firmado por un ingeniero electricista con matrícula."
@@ -63,7 +65,7 @@ def _resumen(p: Proyecto) -> dict:
         "nombre": p.nombre,
         "niveles": p.niveles,
         "recintos": [{"id": r.id, "nombre": r.nombre, "uso": r.uso.value, "nivel": r.nivel,
-                      "area_m2": round(r.area, 2)} for r in p.recintos],
+                      "unidad": r.unidad, "area_m2": round(r.area, 2)} for r in p.recintos],
         "tableros": [t.id for t in p.tableros],
         "circuitos": [{"id": c.id, "tipo": c.tipo.value, "descripcion": c.descripcion} for c in p.circuitos],
         "salidas_por_simbolo": p.conteo_simbolos(),
@@ -235,6 +237,100 @@ def dibujar_en_autocad(laminas: Literal["iluminacion_y_tomas", "completo", "ilum
 
     res = Renderizador(_p(), AutoCADBackend(nuevo_dibujo=nuevo_dibujo)).dibujar_juego(_LAMINAS[laminas])
     return {"resultado": res}
+
+
+# ------------------------------------------------------------------ plano arquitectónico (paso 2)
+def _ruta_plano(ruta: str) -> Path:
+    r = Path(ruta).expanduser()
+    if not r.is_absolute():
+        r = CARPETA / "planos" / r
+    if not r.exists():
+        raise FileNotFoundError(f"No existe {r}")
+    if r.suffix.lower() == ".dwg":
+        from .arquitectura.dwg import convertir_dwg_a_dxf
+
+        r = convertir_dwg_a_dxf(r, CARPETA / "planos" / (r.stem + ".dxf"))
+    return r
+
+
+@mcp.tool()
+def analizar_plano(ruta: str, mapa_capas: Optional[dict[str, str]] = None, unidades: Optional[str] = None) -> dict:
+    """Lee un plano arquitectónico (DXF, o DWG si hay AutoCAD/ODA) y clasifica sus capas.
+
+    Devuelve cada capa con su categoría (muros, puertas, ventanas, aparatos, mobiliario, cotas, textos, ejes,
+    achurados, proyecciones, columnas, escaleras, muros_bajos, otros, ignorar) y el criterio usado.
+    mapa_capas corrige la clasificación: {"_F5": "muros", "BLANCO": "ignorar"}.
+    unidades fuerza la unidad del dibujo ("mm", "cm" o "m") si el archivo no la declara bien.
+    """
+    from .arquitectura import analizar_capas
+
+    return analizar_capas(_ruta_plano(ruta), mapa_capas, unidades)
+
+
+@mcp.tool()
+def depurar_plano(ruta: str, nivel: str = "PISO 1", mapa_capas: Optional[dict[str, str]] = None,
+                  unidades: Optional[str] = None, cargar_en_proyecto: bool = True,
+                  incluir_aparatos: bool = True, vista_previa: bool = True) -> dict:
+    """Depura e interpreta el plano: muros, columnas, puertas, ventanas, recintos (nombre, uso, área) y
+    unidades (apartamentos). Escribe un DXF limpio con capas ARQ-*, un PNG de verificación y un reporte JSON.
+    Si hay un proyecto abierto y cargar_en_proyecto=True, carga la arquitectura y los recintos en el nivel dado
+    (reemplaza lo que hubiera en ese nivel).
+    """
+    from .arquitectura import aplicar_a_proyecto
+    from .arquitectura import depurar_plano as _depurar
+
+    r = _ruta_plano(ruta)
+    res = _depurar(r, CARPETA / "arquitectura", mapa_capas, unidades, incluir_aparatos=incluir_aparatos,
+                   vista_previa=vista_previa)
+    out = {"resumen": res.reporte["resumen"], "unidades": res.reporte["unidades"],
+           "recintos": [{k: v for k, v in x.items() if k in ("id", "nombre", "uso", "unidad", "area_m2", "avisos")}
+                        for x in res.reporte["recintos"]],
+           "avisos": res.reporte["avisos"] + res.plano.avisos, "archivos": res.archivos}
+    p = _estado["proyecto"]
+    if cargar_en_proyecto and p is not None:
+        out["proyecto"] = aplicar_a_proyecto(p, res.interpretacion, nivel, incluir_aparatos=incluir_aparatos)
+        _guardar()
+    elif cargar_en_proyecto:
+        out["proyecto"] = "No hay proyecto abierto: cree o abra uno y vuelva a ejecutar para cargar los recintos."
+    return out
+
+
+@mcp.tool()
+def corregir_recinto(id: str, nombre: Optional[str] = None, uso: Optional[UsoRecinto] = None,
+                     unidad: Optional[str] = None, altura_cielo: Optional[float] = None) -> dict:
+    """Corrige el nombre, uso, unidad (apartamento) o altura de cielo de un recinto del proyecto."""
+    p = _p()
+    r = p.recinto(id)
+    if nombre is not None:
+        r.nombre = nombre
+    if uso is not None:
+        r.uso = uso
+    if unidad is not None:
+        r.unidad = unidad or None
+    if altura_cielo is not None:
+        r.altura_cielo = altura_cielo
+    _guardar()
+    return {"id": r.id, "nombre": r.nombre, "uso": r.uso.value, "unidad": r.unidad, "area_m2": round(r.area, 2)}
+
+
+@mcp.tool()
+def convertir_dwg_a_dxf(ruta_dwg: str) -> dict:
+    """Convierte un DWG a DXF (ODA File Converter o AutoCAD 2026 por COM). El DWG original no se modifica."""
+    from .arquitectura.dwg import convertir_dwg_a_dxf as _conv
+
+    dwg = Path(ruta_dwg).expanduser()
+    return {"dxf": str(_conv(dwg, CARPETA / "planos" / (dwg.stem + ".dxf")))}
+
+
+@mcp.tool()
+def exportar_dibujo_activo() -> dict:
+    """Exporta a DXF el dibujo abierto en AutoCAD (debe estar guardado), para luego depurarlo."""
+    from .arquitectura.dwg import dibujo_activo_a_dxf
+
+    from datetime import datetime
+
+    destino = CARPETA / "planos" / f"dibujo_activo_{datetime.now():%Y%m%d_%H%M%S}.dxf"
+    return {"dxf": str(dibujo_activo_a_dxf(destino))}
 
 
 def main() -> None:
