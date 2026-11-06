@@ -76,3 +76,15 @@ def test_backend_autocad_simulado(monkeypatch):
     assert res.startswith("Dibujado en AutoCAD")
     assert log.count("InsertBlock") > 50
     assert "AddHatch" in log and "AddLightWeightPolyline" in log and "AddAttribute" in log
+
+    # paso 3: diseño automático + cuadros de carga y unifilares por el mismo flujo COM
+    from electromcp.diseno import disenar
+
+    p = construir()
+    p.salidas, p.circuitos, p.tableros, p.tuberias = [], [], [], []
+    for r in p.recintos:
+        r.unidad = "APTO 101"
+    disenar(p)
+    n = len(log)
+    res = Renderizador(p, mod.AutoCADBackend(nuevo_dibujo=True)).dibujar_juego(("iluminacion", "tomas", "cuadros"))
+    assert res.startswith("Dibujado en AutoCAD") and log[n:].count("InsertBlock") > 30
